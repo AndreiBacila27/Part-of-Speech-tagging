@@ -2,6 +2,7 @@ import os
 import re
 import json
 from collections import defaultdict
+import string
 from typing import Dict, DefaultDict
 
 class BrownCorpusAnalyzer:
@@ -23,12 +24,6 @@ class BrownCorpusAnalyzer:
         """
         if not tag or tag == 'nil':
             return 'nil'
-
-        tag = tag.lower()
-        
-        # Skip punctuation tags
-        if tag in ['.', ',', ':', ';', '(', ')', '"', "'", '?', '!']:
-            return None
             
         # Remove -HL, -TL, -NC suffixes
         while re.search(r'-(hl|tl|nc)(?:-|$)', tag):
@@ -48,6 +43,18 @@ class BrownCorpusAnalyzer:
             
         return tag.strip() or 'nil'
     
+    def process_compound_word(self, word: str, pos: str) -> None:
+        """Process compound words separated by '/' (e.g., input/output)"""
+        if '/' in word and not re.match(r'^\d+/\d+$', word):
+            parts = word.split('/')
+            for part in parts:
+                cleaned_word = self.clean_word(part)
+                if cleaned_word and pos is not None:
+                    self.word_pos_counts[cleaned_word][pos] += 1
+                    self.pos_total_counts[pos] += 1
+            return True
+        return False
+
     def clean_word(self, word: str) -> str:
         """Clean word following section 1.3 rules:
         - Remove leading/trailing quotes and spaces
@@ -60,20 +67,25 @@ class BrownCorpusAnalyzer:
         # Handle possessive forms (word's -> word)
         word = re.sub(r"'s$", "", word)
         
+        # Skip if word is only punctuation
+        if word and all(char in string.punctuation for char in word):
+            return None
+        
         # Keep hyphenated words and numeric forms intact
         if '-' in word:
-            # Keep numeric ranges (1-2, 1940-50)
+            # Keep numeric ranges (e.g., 1-2, 1940-50)
             if re.match(r'^\d+(?:-\d+)+$', word):
                 return word
-            # Keep hyphenated compounds unless they end in hyphen
             if not word.endswith('-'):
                 return word
         
-        # Keep numeric forms with slashes (1/2, 3/4)
+        # Keep numeric fractions (e.g., 1/2, 3/4)
         if re.match(r'^\d+/\d+$', word):
             return word
             
-        return word.strip()
+        # Remove any remaining punctuation from the word
+        word = ''.join(char for char in word.strip() if char not in string.punctuation)
+        return word if word else None
     
     def process_tuple(self, tuple: str) -> None:
         """Process a single tuple of format word/POS"""
@@ -81,34 +93,56 @@ class BrownCorpusAnalyzer:
             return
             
         try:
-            # Handle special cases where the last '/' isn't the POS separator
-            if re.match(r'^\d+(?:/\d+)+/[a-zA-Z]+$', tuple):
+            # Handle specific compound word cases (and/or/cc, input/output/nn, origin/destination/nn)
+            if re.match(r'^([a-z]+)/([a-z]+)/([a-z]+)$', tuple):
                 # For cases like "1/2/cd", keep "1/2" as word
+                parts = tuple.split('/')
+                
+                # Last part is POS tag
+                pos = parts[-1]
+                
+                # Get the two words (parts[0] and parts[1])
+                word1, word2 = parts[0], parts[1]
+                
+                # Process each word separately with the same POS tag
+                for word in [word1, word2]:
+                    cleaned_word = self.clean_word(word)
+                    cleaned_pos = self.clean_pos_tag(pos)
+                    if cleaned_word and cleaned_pos is not None:
+                        self.word_pos_counts[cleaned_word][cleaned_pos] += 1
+                        self.pos_total_counts[cleaned_pos] += 1
+                return
+            
+            # Handle special cases like "1/2/cd" where last '/' separates POS tag
+            elif re.match(r'^\d+(?:/\d+)+/[a-z]+$', tuple):
                 parts = tuple.split('/')
                 word = '/'.join(parts[:-1])
                 pos = parts[-1]
             else:
-                # Normal case: split on last '/'
                 word, pos = tuple.rsplit('/', 1)
                 
             # Skip empty words or POS tags
             if not word or not pos:
                 return
-                
-            # Clean the word and POS tag
-            cleaned_word = self.clean_word(word)
-            cleaned_pos = self.clean_pos_tag(pos)
             
-            # Skip punctuation and only process if both word and POS are valid
-            if cleaned_word and cleaned_pos is not None:
-                self.word_pos_counts[cleaned_word][cleaned_pos] += 1
-                self.pos_total_counts[cleaned_pos] += 1
-                    
+            # Clean POS tag
+            cleaned_pos = self.clean_pos_tag(pos)
+            if cleaned_pos is None:
+                return
+
+            # Try to process as compound word first (like "input/output")
+            if not self.process_compound_word(word, cleaned_pos):
+                # If not a compound word, process normally
+                cleaned_word = self.clean_word(word)
+                if cleaned_word is not None:
+                    self.word_pos_counts[cleaned_word][cleaned_pos] += 1
+                    self.pos_total_counts[cleaned_pos] += 1
         except Exception as e:
             print(f"Error processing tuple '{tuple}': {e}")
     
     def process_file_content(self, content: str) -> None:
         """Process all tuples in a file's content"""
+        content = content.lower()
         for tuple in re.split(r"\s+", content.strip()):
             self.process_tuple(tuple)
     
@@ -154,12 +188,12 @@ class BrownCorpusAnalyzer:
                 if word.isalpha()  # Keep only pure alphabetic words
             }
             
-            with open('words_only_counts.json', 'w', encoding='utf-8') as f:
+            with open('words_only_counts.json', 'w+', encoding='utf-8') as f:
                 json.dump(words_only_dict, f, indent=2, sort_keys=True)
             print("Saved words-only counts to words_only_counts.json")
             
             # Save POS total counts
-            with open('pos_total_counts.json', 'w', encoding='utf-8') as f:
+            with open('pos_total_counts.json', 'w+', encoding='utf-8') as f:
                 json.dump(dict(self.pos_total_counts), f, indent=2, sort_keys=True)
             print("Saved POS total counts to pos_total_counts.json")
             
